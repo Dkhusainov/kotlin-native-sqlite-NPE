@@ -1,0 +1,120 @@
+plugins {
+  id 'com.android.library'
+  id 'org.jetbrains.kotlin.multiplatform'
+}
+
+android {
+  compileSdkVersion 29
+  buildToolsVersion "29.0.3"
+
+  defaultConfig {
+    minSdkVersion 21
+    targetSdkVersion 29
+    versionCode 1
+    versionName "1.0"
+
+    testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+  }
+}
+
+dependencies {
+  implementation "org.jetbrains.kotlin:kotlin-stdlib:$kotlin_version"
+  implementation 'androidx.appcompat:appcompat:1.1.0'
+  implementation 'androidx.core:core-ktx:1.3.0'
+  testImplementation 'junit:junit:4.12'
+  androidTestImplementation 'io.requery:sqlite-android:3.31.0'
+  androidTestImplementation 'androidx.sqlite:sqlite:2.0.0'
+  androidTestImplementation 'androidx.test.ext:junit:1.1.1'
+  androidTestImplementation 'androidx.test.espresso:espresso-core:3.2.0'
+}
+
+
+def LIB_NAME = "sqlitekn"
+
+//@formatter:off
+def ndkPresets = [
+  (['arm32', 'androidNativeArm32', 'armeabi-v7a']),
+  (['arm64', 'androidNativeArm64', 'arm64-v8a'  ]),
+  (['x86',   'androidNativeX86',   'x86'        ]),
+  (['x64',   'androidNativeX64',   'x86_64'     ]),
+]
+//@formatter:on
+
+def ideSelectedAbi = project.findProperty("android.injected.build.abi")
+if (ideSelectedAbi != null) {
+  ndkPresets = ndkPresets.findAll { abi-> abi[2] == ideSelectedAbi }
+}
+
+def jni = file("$buildDir/jni")
+android {
+  externalNativeBuild {
+    cmake.setPath((File) null)
+    ndkBuild.setPath((File) null)
+  }
+
+  sourceSets.debug.jniLibs.srcDir("$jni/debug")
+  sourceSets.release.jniLibs.srcDir("$jni/release")
+}
+
+kotlin {
+  android {}
+
+  sourceSets {
+    commonMain {
+      dependencies {
+        api kotlin('stdlib-common')
+      }
+    }
+  }
+
+
+  ndkPresets.each { preset ->
+    def (targetName, presetName) = preset
+    targetFromPreset(kotlin.presets[presetName], targetName) {
+      binaries {
+        sharedLib {
+        }
+      }
+
+      compilations["main"].cinterops {
+        "sqlite3" {
+          includeDirs(file("src/sqlite"))
+        }
+      }
+    }
+  }
+
+  sourceSets {
+    findByName("arm32Main")?.dependsOn(x86Main)
+    findByName("arm64Main")?.dependsOn(x86Main)
+    findByName("x64Main")?.dependsOn(x86Main)
+  }
+}
+
+tasks.named("metadataJar").configure {
+  enabled = false
+}
+
+afterEvaluate {
+  ndkPresets.each {
+    def (targetName, _, abi) = it
+    def target = kotlin.targets[targetName]
+
+    org.jetbrains.kotlin.gradle.plugin.mpp.NativeBuildType.values().each { buildType ->
+      def executable = target.binaries.getSharedLib(buildType)
+      def libFile = executable.outputFile
+      def buildTypeName = buildType.name.toLowerCase()
+
+      def linkTask = executable.linkTask
+      def androidJniTask = tasks.named("merge${buildTypeName.capitalize()}JniLibFolders")
+      def copyLib = tasks.register("copy${buildTypeName.capitalize()}Lib${targetName.capitalize()}", Copy) {
+        from(libFile)
+        into(file("$jni/${buildTypeName}/$abi"))
+        rename { "lib" + LIB_NAME + ".so" }
+      }
+
+      copyLib.configure { dependsOn(linkTask) }
+      androidJniTask.configure { dependsOn(copyLib) }
+    }
+  }
+}
